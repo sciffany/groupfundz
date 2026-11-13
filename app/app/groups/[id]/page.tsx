@@ -10,6 +10,7 @@ import {
 } from "@/components/GroupMonthStepsDashboard";
 import {
   GroupMonthWorkArrivalDashboard,
+  type WorkArrivalDashboardMember,
 } from "@/components/GroupMonthWorkArrivalDashboard";
 import { leaveGroup } from "@/lib/actions/groups";
 import {
@@ -621,7 +622,7 @@ export default async function GroupPage({
           month={month}
           today={todayInTimeZone(DEFAULT_TIMEZONE)}
           dateNotes={arrivalDateNotes(pendingRecipientIds, group.members, dates)}
-          members={group.members.flatMap((member) => {
+          members={group.members.flatMap((member): WorkArrivalDashboardMember[] => {
             const displayName = noteName(member.user, pendingRecipientIds);
             if (pendingRecipientIds.has(member.user.id)) {
               return [
