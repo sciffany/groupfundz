@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 import { requireOnboardedUser } from "@/lib/session";
-import { parseDateOnly } from "@/lib/sleep";
+import { formatDateOnly, parseDateOnly } from "@/lib/sleep";
 import { STEP_SHEET_SOURCES, fetchSheetStepDays } from "@/lib/step-sheets";
 
 export type ImportStepsResult =
@@ -53,9 +53,23 @@ export async function importSheetSteps(groupId: string): Promise<ImportStepsResu
         return night ? [{ night, steps: day.steps }] : [];
       });
 
-      if (rows.length > 0) {
+      const manualNights =
+        rows.length === 0
+          ? []
+          : await prisma.stepNight.findMany({
+              where: {
+                userId: account.id,
+                manual: true,
+                night: { in: rows.map((row) => row.night) },
+              },
+              select: { night: true },
+            });
+      const locked = new Set(manualNights.map((night) => formatDateOnly(night.night)));
+      const writable = rows.filter((row) => !locked.has(formatDateOnly(row.night)));
+
+      if (writable.length > 0) {
         await prisma.$transaction(
-          rows.map((row) =>
+          writable.map((row) =>
             prisma.stepNight.upsert({
               where: { userId_night: { userId: account.id, night: row.night } },
               create: { userId: account.id, night: row.night, steps: row.steps },
@@ -65,7 +79,7 @@ export async function importSheetSteps(groupId: string): Promise<ImportStepsResu
         );
       }
 
-      updated += rows.length;
+      updated += writable.length;
       people += 1;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

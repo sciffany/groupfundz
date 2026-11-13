@@ -229,10 +229,13 @@ export default async function GroupSettingsPage({
             id: target.id,
             effectiveFrom: formatDateOnly(target.effectiveFrom),
             timezone: target.timezone,
+            exempt: target.exempt,
             arrivalMinutes: target.arrivalMinutes,
-            days: parseWeekdayChecklist(target.days) ?? defaultWorkdays(),
-            latitude: target.latitude.toString(),
-            longitude: target.longitude.toString(),
+            days: target.exempt
+              ? null
+              : (parseWeekdayChecklist(target.days) ?? defaultWorkdays()),
+            latitude: target.latitude?.toString() ?? null,
+            longitude: target.longitude?.toString() ?? null,
             radiusMeters: target.radiusMeters,
           })),
           overrides: member.workArrivalOverrides.map((override) => ({

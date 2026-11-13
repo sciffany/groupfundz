@@ -9,8 +9,9 @@ import {
   parsePenaltyUnit,
   parsePenaltyUnitLabel,
 } from "@/lib/penalty";
+import { hasPendingInvite } from "@/lib/pending-members";
 import { parseDateOnly } from "@/lib/sleep";
-import { parseTargetSteps } from "@/lib/steps";
+import { MAX_TARGET_STEPS, parseRecordedSteps, parseTargetSteps } from "@/lib/steps";
 import { requireOnboardedUser } from "@/lib/session";
 
 async function requireOwnedGroup(userId: string, groupId: string) {
@@ -29,6 +30,48 @@ function uniqueConstraintError(error: unknown) {
   return (
     error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002"
   );
+}
+
+export type SetMemberDayStepsResult = { ok: true } | { ok: false; error: string };
+
+export async function setMemberDaySteps(
+  groupId: string,
+  groupMemberId: string,
+  dayRaw: string,
+  stepsRaw: string,
+): Promise<SetMemberDayStepsResult> {
+  const user = await requireOnboardedUser();
+  const group = await requireOwnedGroup(user.id, groupId);
+  if (!group) return { ok: false, error: "You can’t edit this group." };
+
+  const day = parseDateOnly(dayRaw);
+  if (!day) return { ok: false, error: "Enter a valid step day." };
+
+  const steps = parseRecordedSteps(stepsRaw);
+  if (steps === null) {
+    return {
+      ok: false,
+      error: `Enter a whole number of steps from 0 to ${MAX_TARGET_STEPS.toLocaleString("en-US")}.`,
+    };
+  }
+
+  const member = await prisma.groupMember.findUnique({
+    where: { id: groupMemberId },
+  });
+  if (!member || member.groupId !== groupId) {
+    return { ok: false, error: "That member isn’t in this group." };
+  }
+  if (await hasPendingInvite(groupId, member.userId)) {
+    return { ok: false, error: "They haven’t joined this group yet." };
+  }
+
+  await prisma.stepNight.upsert({
+    where: { userId_night: { userId: member.userId, night: day } },
+    create: { userId: member.userId, night: day, steps, manual: true },
+    update: { steps, manual: true },
+  });
+  revalidateGroup(groupId);
+  return { ok: true };
 }
 
 export async function saveStepTarget(

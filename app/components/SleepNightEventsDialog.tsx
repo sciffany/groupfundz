@@ -3,20 +3,35 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useId, useRef, useState, useTransition } from "react";
 import {
+  addSleepEvent,
   deleteSleepEvent,
   deleteSleepEvents,
   listSleepNightEvents,
+  updateSleepEventTime,
   type SleepNightEventView,
 } from "@/lib/actions/sleep";
 import { weekdayShort } from "@/lib/month";
+
+const ADDABLE_SLEEP_EVENTS = [
+  { type: "PHONE_ACTIVITY", label: "Phone activity" },
+  { type: "ACTIVITY", label: "Desktop activity" },
+  { type: "APP_CLOSE", label: "Desktop tracker stopped" },
+  { type: "PHONE_SESSION_START", label: "Phone session started" },
+  { type: "PHONE_SESSION_END", label: "Phone session ended" },
+] as const;
+
+const timeInputClass =
+  "rounded-md border border-neutral-300 bg-white px-2 py-1 text-xs outline-none focus:border-neutral-500";
 
 type LoadState =
   | { status: "loading" }
   | { status: "error"; message: string }
   | {
       status: "ready";
-      canDelete: boolean;
+      canEdit: boolean;
       countedAtLabel: string | null;
+      windowStart: string;
+      windowEnd: string;
       events: SleepNightEventView[];
     };
 
@@ -44,6 +59,10 @@ export function SleepNightEventsDialog({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [timeDraft, setTimeDraft] = useState("");
+  const [addType, setAddType] = useState("PHONE_ACTIVITY");
+  const [addTime, setAddTime] = useState("");
   const [isPending, startTransition] = useTransition();
   const anchorIndex = useRef<number | null>(null);
   const shiftHeld = useRef(false);
@@ -65,8 +84,10 @@ export function SleepNightEventsDialog({
       }
       setLoad({
         status: "ready",
-        canDelete: result.canDelete,
+        canEdit: result.canEdit,
         countedAtLabel: result.countedAtLabel,
+        windowStart: result.windowStart,
+        windowEnd: result.windowEnd,
         events: result.events,
       });
     });
@@ -142,8 +163,42 @@ export function SleepNightEventsDialog({
     anchorIndex.current = index;
   };
 
+  const saveTime = (eventId: string) => {
+    if (load.status !== "ready" || !load.canEdit || isPending) return;
+    setPendingDelete(`edit:${eventId}`);
+    setDeleteError(null);
+    startTransition(async () => {
+      const result = await updateSleepEventTime(groupId, eventId, night, timeDraft);
+      setPendingDelete(null);
+      if (!result.ok) {
+        setDeleteError(result.error);
+        return;
+      }
+      setEditingId(null);
+      setReloadToken((token) => token + 1);
+      router.refresh();
+    });
+  };
+
+  const addEvent = () => {
+    if (load.status !== "ready" || !load.canEdit || isPending) return;
+    setPendingDelete("add");
+    setDeleteError(null);
+    startTransition(async () => {
+      const result = await addSleepEvent(groupId, memberId, night, addType, addTime);
+      setPendingDelete(null);
+      if (!result.ok) {
+        setDeleteError(result.error);
+        return;
+      }
+      setAddTime("");
+      setReloadToken((token) => token + 1);
+      router.refresh();
+    });
+  };
+
   const removeEvent = (event: SleepNightEventView) => {
-    if (load.status !== "ready" || !load.canDelete || isPending) return;
+    if (load.status !== "ready" || !load.canEdit || isPending) return;
     const confirmed = window.confirm(
       `Delete this ${event.label.toLowerCase()} at ${event.timeLabel}? This night will be recalculated.`,
     );
@@ -170,7 +225,7 @@ export function SleepNightEventsDialog({
   };
 
   const removeSelected = () => {
-    if (load.status !== "ready" || !load.canDelete || isPending) return;
+    if (load.status !== "ready" || !load.canEdit || isPending) return;
     const ids = load.events
       .filter((event) => selected.has(event.id))
       .map((event) => event.id);
@@ -237,8 +292,8 @@ export function SleepNightEventsDialog({
           <p className="text-xs text-neutral-500">
             Events from 8:00 PM to 6:00 AM that set this night. The marked event
             is the one the table uses.
-            {load.status === "ready" && load.canDelete
-              ? " Select events to delete them together. Deleting recalculates the night."
+            {load.status === "ready" && load.canEdit
+              ? " Change a time, add an event, or delete events. The night is recalculated."
               : ""}
           </p>
 
@@ -279,7 +334,7 @@ export function SleepNightEventsDialog({
                 </p>
               ) : (
                 <>
-                  {load.canDelete ? (
+                  {load.canEdit ? (
                     <div className="mt-3 flex items-center justify-between gap-3">
                       <label className="flex items-center gap-2 text-sm text-neutral-700">
                         <input
@@ -315,7 +370,7 @@ export function SleepNightEventsDialog({
                           event.decides ? "-mx-2 bg-amber-50 px-2" : ""
                         }`}
                       >
-                        {load.canDelete ? (
+                        {load.canEdit ? (
                           <input
                             type="checkbox"
                             checked={selected.has(event.id)}
@@ -348,16 +403,66 @@ export function SleepNightEventsDialog({
                           {event.note ? (
                             <p className="mt-1 text-xs text-neutral-600">{event.note}</p>
                           ) : null}
+                          {editingId === event.id ? (
+                            <form
+                              className="mt-2 flex flex-wrap items-center gap-2"
+                              onSubmit={(submit) => {
+                                submit.preventDefault();
+                                saveTime(event.id);
+                              }}
+                            >
+                              <input
+                                type="datetime-local"
+                                step={1}
+                                required
+                                min={load.windowStart}
+                                max={load.windowEnd}
+                                value={timeDraft}
+                                onChange={(change) => setTimeDraft(change.target.value)}
+                                aria-label={`Time for ${event.label}`}
+                                className={timeInputClass}
+                              />
+                              <button
+                                type="submit"
+                                disabled={isPending}
+                                className="rounded-lg bg-neutral-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-neutral-800 disabled:opacity-60"
+                              >
+                                {pendingDelete === `edit:${event.id}` ? "Saving…" : "Save"}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isPending}
+                                onClick={() => setEditingId(null)}
+                                className="rounded-lg px-2 py-1 text-xs text-neutral-500 hover:bg-neutral-100"
+                              >
+                                Cancel
+                              </button>
+                            </form>
+                          ) : null}
                         </div>
-                        {load.canDelete ? (
-                          <button
-                            type="button"
-                            disabled={isPending}
-                            onClick={() => removeEvent(event)}
-                            className="shrink-0 rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-60"
-                          >
-                            {pendingDelete === event.id ? "Deleting…" : "Delete"}
-                          </button>
+                        {load.canEdit ? (
+                          <div className="flex shrink-0 gap-1.5">
+                            <button
+                              type="button"
+                              disabled={isPending}
+                              onClick={() => {
+                                setEditingId(event.id);
+                                setTimeDraft(event.timeValue);
+                                setDeleteError(null);
+                              }}
+                              className="rounded-lg border border-neutral-200 bg-white px-2.5 py-1 text-xs font-medium text-neutral-700 hover:bg-neutral-50 disabled:opacity-60"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isPending}
+                              onClick={() => removeEvent(event)}
+                              className="rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-60"
+                            >
+                              {pendingDelete === event.id ? "Deleting…" : "Delete"}
+                            </button>
+                          </div>
                         ) : null}
                       </li>
                     ))}
@@ -370,6 +475,52 @@ export function SleepNightEventsDialog({
                   {load.events.length.toLocaleString("en-SG")}{" "}
                   {load.events.length === 1 ? "event" : "events"}
                 </p>
+              ) : null}
+
+              {load.canEdit ? (
+                <form
+                  className="mt-4 space-y-2 border-t border-neutral-200 pt-3"
+                  onSubmit={(submit) => {
+                    submit.preventDefault();
+                    addEvent();
+                  }}
+                >
+                  <p className="text-sm font-medium text-neutral-900">Add an event</p>
+                  <label className="block text-xs text-neutral-600">
+                    Type
+                    <select
+                      value={addType}
+                      onChange={(change) => setAddType(change.target.value)}
+                      className={`mt-1 block w-full ${timeInputClass}`}
+                    >
+                      {ADDABLE_SLEEP_EVENTS.map((option) => (
+                        <option key={option.type} value={option.type}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="block text-xs text-neutral-600">
+                    Time
+                    <input
+                      type="datetime-local"
+                      step={1}
+                      required
+                      min={load.windowStart}
+                      max={load.windowEnd}
+                      value={addTime}
+                      onChange={(change) => setAddTime(change.target.value)}
+                      className={`mt-1 block w-full ${timeInputClass}`}
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    disabled={isPending}
+                    className="rounded-lg bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-neutral-800 disabled:opacity-60"
+                  >
+                    {pendingDelete === "add" ? "Adding…" : "Add event"}
+                  </button>
+                </form>
               ) : null}
             </>
           ) : null}

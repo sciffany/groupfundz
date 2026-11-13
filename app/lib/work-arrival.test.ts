@@ -3,16 +3,18 @@ import { localDateTime } from "@/lib/sleep";
 import {
   arrivalTargetChangeNote,
   arrivalTargetStartNote,
+  arrivalTimeZoneForDate,
   chargeWorkArrivalMonth,
   defaultWorkdays,
   distanceMeters,
   checkInFeedback,
   earlierCheckIn,
   formatLatitude,
+  instantOnWorkDay,
   isInsideRadius,
   parseLatitude,
   workDayForArrival,
-  type WorkArrivalOverrideForCharge,
+  type ActiveWorkArrivalTarget,
   type WorkArrivalPenaltyForCharge,
   type WorkArrivalTargetForCharge,
 } from "@/lib/work-arrival";
@@ -23,10 +25,11 @@ const DAY = "2026-10-27";
 function target(
   days = defaultWorkdays(),
   arrivalMinutes = 9 * 60,
-): WorkArrivalTargetForCharge {
+): ActiveWorkArrivalTarget {
   return {
     effectiveFrom: "2026-01-01",
     timezone: "Asia/Singapore",
+    exempt: false,
     arrivalMinutes,
     days,
     ...PLACE,
@@ -48,7 +51,9 @@ function penalty(
 }
 
 function at(minutes: number, extraMs = 0): Date {
-  return new Date(localDateTime(DAY, minutes, "Asia/Singapore").getTime() + extraMs);
+  return new Date(
+    localDateTime(DAY, minutes, "Asia/Singapore").getTime() + extraMs,
+  );
 }
 
 function charge(input: {
@@ -193,7 +198,11 @@ test("an override makes an unchecked day count and replaces the clock time", () 
         arrivalMinutes: 11 * 60,
       },
     ],
-    checkIn: { arrivedAt, latitude: PLACE.latitude, longitude: PLACE.longitude },
+    checkIn: {
+      arrivedAt,
+      latitude: PLACE.latitude,
+      longitude: PLACE.longitude,
+    },
   });
   expect(result.cells[sunday]).toMatchObject({
     time: "10:00 AM",
@@ -299,7 +308,11 @@ test("an exempt day is left out of the monthly penalty total", () => {
   });
   expect(result.cells[DAY].exempt).toBe(true);
   expect(result.cells[DAY].charge).toBeNull();
-  expect(result.cells[next]).toMatchObject({ miss: true, charge: "$5.00", exempt: false });
+  expect(result.cells[next]).toMatchObject({
+    miss: true,
+    charge: "$5.00",
+    exempt: false,
+  });
   expect(result.totalCharge).toBe("$5.00");
 });
 
@@ -352,6 +365,46 @@ test("a counted day with no geofence is a miss", () => {
   expect(result.cells[DAY]).toMatchObject({ miss: true, charge: "$5.00" });
 });
 
+test("an exemption owes nothing, including a missing check-in", () => {
+  const result = charge({
+    targets: [
+      {
+        effectiveFrom: "2026-01-01",
+        timezone: "Asia/Singapore",
+        exempt: true,
+      },
+    ],
+    checkIn: null,
+  });
+  expect(result.cells[DAY]).toEqual({
+    time: null,
+    miss: false,
+    late: false,
+    charge: null,
+  });
+  expect(result.totalCharge).toBe("$0.00");
+});
+
+test("an exemption starts on its date and the next target ends it", () => {
+  const exempt = {
+    effectiveFrom: "2026-10-01",
+    timezone: "Asia/Singapore",
+    exempt: true as const,
+  };
+  const resumed = target();
+  resumed.effectiveFrom = "2026-10-28";
+  const targets = [target(), exempt, resumed];
+
+  const before = charge({ date: "2026-09-30", targets, checkIn: null });
+  expect(before.cells["2026-09-30"].miss).toBe(true);
+
+  const during = charge({ date: DAY, targets, checkIn: null });
+  expect(during.cells[DAY]).toMatchObject({ miss: false, charge: null });
+
+  const after = charge({ date: "2026-10-28", targets, checkIn: null });
+  expect(after.cells["2026-10-28"].miss).toBe(true);
+});
+
 test("the latest target on or before the day covers it", () => {
   const later = target();
   later.effectiveFrom = "2026-10-28";
@@ -362,6 +415,27 @@ test("the latest target on or before the day covers it", () => {
   });
   expect(result.cells[DAY].miss).toBe(false);
   expect(result.cells[DAY].charge).toBeNull();
+});
+
+test("an arrival clock uses the override, then the covering target", () => {
+  const targets = [{ effectiveFrom: "2026-01-01", timezone: "Asia/Singapore" }];
+  expect(arrivalTimeZoneForDate(DAY, targets, [])).toBe("Asia/Singapore");
+  expect(
+    arrivalTimeZoneForDate(DAY, targets, [
+      { date: DAY, timezone: "America/New_York" },
+    ]),
+  ).toBe("America/New_York");
+  expect(arrivalTimeZoneForDate(DAY, [], [])).toBe("Asia/Singapore");
+  expect(
+    arrivalTimeZoneForDate(DAY, [{ effectiveFrom: "2026-01-01", timezone: "Mars/Base" }], []),
+  ).toBe("Asia/Singapore");
+});
+
+test("a check-in time edit stays on that work day", () => {
+  const morning = new Date("2026-10-27T01:30:00.000Z");
+  expect(instantOnWorkDay(morning, DAY, "Asia/Singapore")).toBe(true);
+  expect(instantOnWorkDay(morning, "2026-10-26", "Asia/Singapore")).toBe(false);
+  expect(instantOnWorkDay(morning, DAY, "Not/AZone")).toBe(false);
 });
 
 test("a check-in work day follows the covering target timezone", () => {
@@ -378,6 +452,24 @@ test("a check-in work day follows the covering target timezone", () => {
       instant,
     ),
   ).toEqual({ workDay: "2026-10-28", timezone: "Asia/Singapore" });
+});
+
+test("an exemption is noted as no target", () => {
+  expect(
+    arrivalTargetStartNote({
+      exempt: true,
+    }),
+  ).toBe("No target");
+  expect(arrivalTargetChangeNote(target(), { exempt: true })).toBe("No target");
+  expect(
+    arrivalTargetChangeNote({ exempt: true }, { exempt: true }),
+  ).toBeNull();
+});
+
+test("a target after an exemption states the new rule", () => {
+  expect(arrivalTargetChangeNote({ exempt: true }, target())).toBe(
+    "Arrive by 9:00 AM · Mon, Tue, Wed, Thu, Fri · Place · 100 m",
+  );
 });
 
 test("a target that has not started does not set the work day", () => {
@@ -415,9 +507,9 @@ test("an identical arrival target is not a date note", () => {
 });
 
 test("a later arrival time is noted like a bedtime change", () => {
-  expect(arrivalTargetChangeNote(target(), target(defaultWorkdays(), 9 * 60 + 30))).toBe(
-    "Arrive by 9:30 AM",
-  );
+  expect(
+    arrivalTargetChangeNote(target(), target(defaultWorkdays(), 9 * 60 + 30)),
+  ).toBe("Arrive by 9:30 AM");
 });
 
 test("a changed weekday set is noted with the new days", () => {

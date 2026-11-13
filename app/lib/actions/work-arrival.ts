@@ -9,18 +9,22 @@ import {
   parsePenaltyUnit,
   parsePenaltyUnitLabel,
 } from "@/lib/penalty";
+import { hasPendingInvite } from "@/lib/pending-members";
 import {
   coveringEntry,
   formatDateOnly,
   isValidTimeZone,
   parseDateOnly,
+  parseZonedDateTime,
 } from "@/lib/sleep";
 import { requireOnboardedUser } from "@/lib/session";
 import {
   DEFAULT_ARRIVAL_MINUTES,
+  arrivalTimeZoneForDate,
   checkInFeedback,
   checklistFromWeekdays,
   earlierCheckIn,
+  instantOnWorkDay,
   isInsideRadius,
   parseArrivalMinutes,
   parseBlockMinutes,
@@ -51,6 +55,37 @@ function uniqueConstraintError(error: unknown) {
 
 function decimal(value: number): Prisma.Decimal {
   return new Prisma.Decimal(value.toFixed(7));
+}
+
+function arrivalTargetFields(
+  formData: FormData,
+  effectiveFrom: Date,
+  timezone: string,
+) {
+  const arrivalMinutes = parseArrivalMinutes(formData.get("arrivalTime"));
+  if (arrivalMinutes === null) return { error: "Enter an arrival time." };
+
+  const latitude = parseLatitude(formData.get("latitude"));
+  if (latitude === null) return { error: "Enter a latitude from -90 to 90." };
+  const longitude = parseLongitude(formData.get("longitude"));
+  if (longitude === null) return { error: "Enter a longitude from -180 to 180." };
+  const radiusMeters = parseRadiusMeters(formData.get("radiusMeters"));
+  if (radiusMeters === null) {
+    return { error: "Enter a radius in meters between 1 and 1,000,000." };
+  }
+
+  return {
+    effectiveFrom,
+    timezone,
+    exempt: false as const,
+    arrivalMinutes,
+    days: weekdayChecklistToJson(
+      checklistFromWeekdays(formData.getAll("day").map(String)),
+    ),
+    latitude: decimal(latitude),
+    longitude: decimal(longitude),
+    radiusMeters,
+  };
 }
 
 async function recordedWorkDay(groupMemberId: string, instant: Date) {
@@ -92,30 +127,20 @@ export async function saveWorkArrivalTarget(
   if (!effectiveFrom) return { error: "Enter a valid starting date." };
   if (!isValidTimeZone(timezone)) return { error: "Choose a valid timezone." };
 
-  const arrivalMinutes = parseArrivalMinutes(formData.get("arrivalTime"));
-  if (arrivalMinutes === null) return { error: "Enter an arrival time." };
-
-  const latitude = parseLatitude(formData.get("latitude"));
-  if (latitude === null) return { error: "Enter a latitude from -90 to 90." };
-  const longitude = parseLongitude(formData.get("longitude"));
-  if (longitude === null) return { error: "Enter a longitude from -180 to 180." };
-  const radiusMeters = parseRadiusMeters(formData.get("radiusMeters"));
-  if (radiusMeters === null) {
-    return { error: "Enter a radius in meters between 1 and 1,000,000." };
-  }
-
-  const days = weekdayChecklistToJson(
-    checklistFromWeekdays(formData.getAll("day").map(String)),
-  );
-  const data = {
-    effectiveFrom,
-    timezone,
-    arrivalMinutes,
-    days,
-    latitude: decimal(latitude),
-    longitude: decimal(longitude),
-    radiusMeters,
-  };
+  const exempt = String(formData.get("kind") ?? "") === "none";
+  const data = exempt
+    ? {
+        effectiveFrom,
+        timezone,
+        exempt: true,
+        arrivalMinutes: null,
+        days: Prisma.DbNull,
+        latitude: null,
+        longitude: null,
+        radiusMeters: null,
+      }
+    : arrivalTargetFields(formData, effectiveFrom, timezone);
+  if ("error" in data) return data;
 
   try {
     if (targetId) {
@@ -139,6 +164,7 @@ export async function saveWorkArrivalTarget(
   }
 
   revalidateGroup(groupId);
+  if (exempt) return { success: targetId ? "No target saved." : "No target added." };
   return { success: targetId ? "Target saved." : "Target added." };
 }
 
@@ -406,22 +432,115 @@ export async function recordWorkArrivalCheckIn(
     where: { groupMemberId: membership.id },
     select: {
       effectiveFrom: true,
+      exempt: true,
       latitude: true,
       longitude: true,
       radiusMeters: true,
     },
   });
-  const place = coveringEntry(
-    targets.map((target) => ({
-      effectiveFrom: formatDateOnly(target.effectiveFrom),
+  const places: (
+    | { effectiveFrom: string; exempt: true }
+    | {
+        effectiveFrom: string;
+        exempt: false;
+        latitude: number;
+        longitude: number;
+        radiusMeters: number;
+      }
+  )[] = [];
+  for (const target of targets) {
+    const effectiveFrom = formatDateOnly(target.effectiveFrom);
+    if (target.exempt) {
+      places.push({ effectiveFrom, exempt: true });
+      continue;
+    }
+    if (
+      target.latitude === null ||
+      target.longitude === null ||
+      target.radiusMeters === null
+    ) {
+      continue;
+    }
+    places.push({
+      effectiveFrom,
+      exempt: false,
       latitude: Number(target.latitude),
       longitude: Number(target.longitude),
       radiusMeters: target.radiusMeters,
-    })),
-    formatDateOnly(workDay),
-  );
-  const insidePlace = place ? isInsideRadius(point, place) : null;
+    });
+  }
+  const covering = coveringEntry(places, formatDateOnly(workDay));
+  const insidePlace =
+    covering && !covering.exempt ? isInsideRadius(point, covering) : null;
   return checkInFeedback({ keptEarlier, insidePlace });
+}
+
+export type UpdateWorkArrivalCheckInTimeResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
+export async function updateWorkArrivalCheckInTime(
+  groupId: string,
+  groupMemberId: string,
+  workDayRaw: string,
+  arrivedAtRaw: string,
+): Promise<UpdateWorkArrivalCheckInTimeResult> {
+  const user = await requireOnboardedUser();
+  const group = await requireOwnedGroup(user.id, groupId);
+  if (!group) return { ok: false, error: "You can’t edit this group." };
+
+  const workDay = parseDateOnly(workDayRaw);
+  if (!workDay) return { ok: false, error: "Enter a valid work day." };
+  const workDayKey = formatDateOnly(workDay);
+
+  const member = await prisma.groupMember.findUnique({
+    where: { id: groupMemberId },
+    include: {
+      workArrivalTargets: {
+        select: { effectiveFrom: true, timezone: true },
+      },
+      workArrivalOverrides: {
+        select: { date: true, timezone: true },
+      },
+    },
+  });
+  if (!member || member.groupId !== groupId) {
+    return { ok: false, error: "That member isn’t in this group." };
+  }
+  if (await hasPendingInvite(groupId, member.userId)) {
+    return { ok: false, error: "They haven’t joined this group yet." };
+  }
+
+  const existing = await prisma.workArrivalDay.findUnique({
+    where: { userId_workDay: { userId: member.userId, workDay } },
+  });
+  if (!existing?.arrivedAt) {
+    return { ok: false, error: "There’s no check-in for this day." };
+  }
+
+  const timeZone = arrivalTimeZoneForDate(
+    workDayKey,
+    member.workArrivalTargets.map((target) => ({
+      effectiveFrom: formatDateOnly(target.effectiveFrom),
+      timezone: target.timezone,
+    })),
+    member.workArrivalOverrides.map((override) => ({
+      date: formatDateOnly(override.date),
+      timezone: override.timezone,
+    })),
+  );
+  const arrivedAt = parseZonedDateTime(arrivedAtRaw, timeZone);
+  if (!arrivedAt) return { ok: false, error: "Enter a valid check-in time." };
+  if (!instantOnWorkDay(arrivedAt, workDayKey, timeZone)) {
+    return { ok: false, error: "Enter a time on this work day." };
+  }
+
+  await prisma.workArrivalDay.update({
+    where: { id: existing.id },
+    data: { arrivedAt },
+  });
+  revalidateGroup(groupId);
+  return { ok: true };
 }
 
 export async function deleteWorkArrivalCheckIn(formData: FormData) {

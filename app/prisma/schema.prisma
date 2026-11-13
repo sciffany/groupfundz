@@ -266,6 +266,8 @@ model StepNight {
   /// Calendar day this step total covers (column name mirrors SleepNight).
   night     DateTime @db.Date
   steps     Int
+  /// Owner correction. Phone and sheet imports leave this total alone.
+  manual    Boolean  @default(false)
   updatedAt DateTime @updatedAt
 
   @@unique([userId, night])
@@ -298,13 +300,16 @@ model WorkArrivalTarget {
   effectiveFrom   DateTime    @db.Date
   /// IANA timezone the clock time and work-day midnight are local to.
   timezone        String
-  /// Minutes from local midnight, 0–1439.
-  arrivalMinutes  Int
-  /// JSON object keyed by JS weekday 0–6 (Sun=0). True means that weekday counts.
-  days            Json
-  latitude        Decimal     @db.Decimal(10, 7)
-  longitude       Decimal     @db.Decimal(10, 7)
-  radiusMeters    Int
+  /// When true, there is no arrival target from effectiveFrom until the next target.
+  exempt          Boolean     @default(false)
+  /// Minutes from local midnight, 0–1439. Null while exempt.
+  arrivalMinutes  Int?
+  /// JSON object keyed by JS weekday 0–6 (Sun=0). True means that weekday counts. Null while exempt.
+  days            Json?
+  latitude        Decimal?    @db.Decimal(10, 7)
+  longitude       Decimal?    @db.Decimal(10, 7)
+  /// Null while exempt.
+  radiusMeters    Int?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 

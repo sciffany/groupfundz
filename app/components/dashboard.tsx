@@ -78,11 +78,13 @@ export function DashboardMetricCell({
   value,
   flagged,
   penaltyLabel,
+  caption = null,
   className = "",
 }: {
   value: string | null;
   flagged: boolean;
   penaltyLabel: string | null;
+  caption?: string | null;
   className?: string;
 }) {
   return (
@@ -103,6 +105,11 @@ export function DashboardMetricCell({
           {flagged && penaltyLabel ? (
             <span className="mt-0.5 block truncate text-[10px] tabular-nums text-rose-700">
               {penaltyLabel}
+            </span>
+          ) : null}
+          {caption ? (
+            <span className="mt-0.5 block truncate text-[10px] text-neutral-400 sm:text-xs">
+              {caption}
             </span>
           ) : null}
         </div>

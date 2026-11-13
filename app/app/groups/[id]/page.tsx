@@ -38,6 +38,7 @@ import {
   WEEKDAY_LABELS,
   defaultSleepTimes,
   formatDateOnly,
+  formatDateTimeLocal,
   formatHalfHoursPast8pm,
   parseDateOnly,
   parseSleepTimes,
@@ -48,10 +49,12 @@ import {
 import {
   arrivalTargetChangeNote,
   arrivalTargetStartNote,
+  arrivalTimeZoneForDate,
   chargeWorkArrivalMonth,
   checkInPoint,
   formatArrivalMinutes,
-  parseWeekdayChecklist,
+  workArrivalTargetForCharge,
+  type WorkArrivalTargetForCharge,
 } from "@/lib/work-arrival";
 
 function sharedDateNotes(
@@ -191,11 +194,13 @@ function arrivalDateNotes(
     user: Parameters<typeof displayNameOf>[0] & { id: string };
     workArrivalTargets: {
       effectiveFrom: Date;
-      arrivalMinutes: number;
+      timezone: string;
+      exempt: boolean;
+      arrivalMinutes: number | null;
       days: unknown;
       latitude: unknown;
       longitude: unknown;
-      radiusMeters: number;
+      radiusMeters: number | null;
     }[];
     workArrivalOverrides: {
       date: Date;
@@ -219,31 +224,27 @@ function arrivalDateNotes(
     const targets = [...member.workArrivalTargets].sort((a, b) =>
       formatDateOnly(a.effectiveFrom).localeCompare(formatDateOnly(b.effectiveFrom)),
     );
-    let previous: {
-      arrivalMinutes: number;
-      days: NonNullable<ReturnType<typeof parseWeekdayChecklist>>;
-      latitude: number;
-      longitude: number;
-      radiusMeters: number;
-    } | null = null;
+    let previous: WorkArrivalTargetForCharge | null = null;
     for (const target of targets) {
-      const days = parseWeekdayChecklist(target.days);
-      if (!days) continue;
-      const snapshot = {
+      const rule = workArrivalTargetForCharge({
+        effectiveFrom: formatDateOnly(target.effectiveFrom),
+        timezone: target.timezone,
+        exempt: target.exempt,
         arrivalMinutes: target.arrivalMinutes,
-        days,
-        latitude: Number(target.latitude),
-        longitude: Number(target.longitude),
+        days: target.days,
+        latitude: target.latitude === null ? null : Number(target.latitude),
+        longitude: target.longitude === null ? null : Number(target.longitude),
         radiusMeters: target.radiusMeters,
-      };
-      const date = formatDateOnly(target.effectiveFrom);
+      });
+      if (!rule) continue;
+      const date = rule.effectiveFrom;
       if (visible.has(date)) {
         const text = previous
-          ? arrivalTargetChangeNote(previous, snapshot)
-          : arrivalTargetStartNote(snapshot);
+          ? arrivalTargetChangeNote(previous, rule)
+          : arrivalTargetStartNote(rule);
         if (text) push(date, name, text);
       }
-      previous = snapshot;
+      previous = rule;
     }
 
     for (const override of member.workArrivalOverrides) {
@@ -309,7 +310,7 @@ export default async function GroupPage({
               },
               stepNights: {
                 where: { night: { gte: monthStart, lte: monthEnd } },
-                select: { night: true, steps: true },
+                select: { night: true, steps: true, manual: true },
               },
               workArrivalDays: {
                 where: { workDay: { gte: monthStart, lte: monthEnd } },
@@ -356,16 +357,17 @@ export default async function GroupPage({
             },
             orderBy: { effectiveFrom: "asc" },
           },
-          workArrivalTargets: {
-            select: {
-              effectiveFrom: true,
-              timezone: true,
-              arrivalMinutes: true,
-              days: true,
-              latitude: true,
-              longitude: true,
-              radiusMeters: true,
-            },
+            workArrivalTargets: {
+              select: {
+                effectiveFrom: true,
+                timezone: true,
+                exempt: true,
+                arrivalMinutes: true,
+                days: true,
+                latitude: true,
+                longitude: true,
+                radiusMeters: true,
+              },
             orderBy: { effectiveFrom: "asc" },
           },
           workArrivalOverrides: {
@@ -463,6 +465,7 @@ export default async function GroupPage({
           groupId={group.id}
           month={month}
           today={todayInTimeZone(DEFAULT_TIMEZONE)}
+          canEdit={isOwner}
           dateNotes={sleepDateNotes(pendingRecipientIds, group.members, dates)}
           members={group.members.map((member) => {
           const displayName = noteName(member.user, pendingRecipientIds);
@@ -533,10 +536,12 @@ export default async function GroupPage({
           dateNotes={stepTargetDateNotes(pendingRecipientIds, group.members, dates)}
           members={group.members.map((member) => {
             const displayName = noteName(member.user, pendingRecipientIds);
+            const editable = isOwner && !pendingRecipientIds.has(member.user.id);
             if (pendingRecipientIds.has(member.user.id)) {
               return {
                 id: member.id,
                 displayName,
+                editable: false,
                 cells: Object.fromEntries(
                   dates.map((date) => [date, { steps: null, below: false, penaltyLabel: null }]),
                 ),
@@ -556,17 +561,24 @@ export default async function GroupPage({
             const nights = new Map(
               member.user.stepNights.map((night) => [
                 formatDateOnly(night.night),
-                night.steps,
+                night,
               ]),
             );
             const cells: Record<string, StepsDashboardCell> = {};
             let totalCents = 0;
             for (const date of dates) {
-              const steps = nights.get(date);
+              const record = nights.get(date);
+              const steps = record?.steps;
+              const edited = record?.manual ?? false;
               const target = coveringPenalty(targets, date);
               const penalty = coveringPenalty(penalties, date);
               if (steps === undefined || !target) {
-                cells[date] = { steps: steps ?? null, below: false, penaltyLabel: null };
+                cells[date] = {
+                  steps: steps ?? null,
+                  below: false,
+                  penaltyLabel: null,
+                  edited,
+                };
                 continue;
               }
 
@@ -580,6 +592,7 @@ export default async function GroupPage({
                 penaltyLabel: below
                   ? formatPenaltyCharge(cents, penalty?.unit, penalty?.unitLabel)
                   : null,
+                edited,
               };
             }
 
@@ -590,6 +603,7 @@ export default async function GroupPage({
             return {
               id: member.id,
               displayName,
+              editable,
               cells,
               totalPenalty: formatPenaltyCharge(
                 totalCents,
@@ -614,6 +628,7 @@ export default async function GroupPage({
                 {
                   id: member.id,
                   displayName,
+                  editable: false,
                   cells: Object.fromEntries(
                     dates.map((date) => [
                       date,
@@ -623,6 +638,8 @@ export default async function GroupPage({
                         late: false,
                         penaltyLabel: null,
                         exempt: false,
+                        timeValue: null,
+                        timeZone: null,
                       },
                     ]),
                   ),
@@ -631,19 +648,17 @@ export default async function GroupPage({
               ];
             }
             const targets = member.workArrivalTargets.flatMap((target) => {
-              const days = parseWeekdayChecklist(target.days);
-              if (!days) return [];
-              return [
-                {
-                  effectiveFrom: formatDateOnly(target.effectiveFrom),
-                  timezone: target.timezone,
-                  arrivalMinutes: target.arrivalMinutes,
-                  days,
-                  latitude: Number(target.latitude),
-                  longitude: Number(target.longitude),
-                  radiusMeters: target.radiusMeters,
-                },
-              ];
+              const rule = workArrivalTargetForCharge({
+                effectiveFrom: formatDateOnly(target.effectiveFrom),
+                timezone: target.timezone,
+                exempt: target.exempt,
+                arrivalMinutes: target.arrivalMinutes,
+                days: target.days,
+                latitude: target.latitude === null ? null : Number(target.latitude),
+                longitude: target.longitude === null ? null : Number(target.longitude),
+                radiusMeters: target.radiusMeters,
+              });
+              return rule ? [rule] : [];
             });
             const overrides = member.workArrivalOverrides.map((override) => ({
               date: formatDateOnly(override.date),
@@ -677,21 +692,31 @@ export default async function GroupPage({
               checkInByWorkDay,
               today: todayInTimeZone(DEFAULT_TIMEZONE),
             });
+            const editable = isOwner && !pendingRecipientIds.has(member.user.id);
             return [
               {
                 id: member.id,
                 displayName,
+                editable,
                 cells: Object.fromEntries(
-                  Object.entries(charged.cells).map(([date, cell]) => [
-                    date,
-                    {
-                      time: cell.time,
-                      miss: cell.miss,
-                      late: cell.late,
-                      penaltyLabel: cell.charge,
-                      exempt: cell.exempt,
-                    },
-                  ]),
+                  Object.entries(charged.cells).map(([date, cell]) => {
+                    const timeZone = arrivalTimeZoneForDate(date, targets, overrides);
+                    const checkIn = checkInByWorkDay.get(date) ?? null;
+                    return [
+                      date,
+                      {
+                        time: cell.time,
+                        miss: cell.miss,
+                        late: cell.late,
+                        penaltyLabel: cell.charge,
+                        exempt: cell.exempt,
+                        timeValue: checkIn
+                          ? formatDateTimeLocal(checkIn.arrivedAt, timeZone)
+                          : null,
+                        timeZone,
+                      },
+                    ];
+                  }),
                 ),
                 totalPenalty: charged.totalCharge,
               },

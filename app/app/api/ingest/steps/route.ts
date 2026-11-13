@@ -78,6 +78,7 @@ export async function POST(request: Request) {
         where: {
           userId: user.id,
           night: row.day,
+          manual: false,
           steps: { lte: row.stepCount },
         },
         data: { steps: row.stepCount },

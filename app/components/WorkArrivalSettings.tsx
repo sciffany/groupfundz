@@ -56,11 +56,12 @@ export type WorkArrivalTargetView = {
   id: string;
   effectiveFrom: string;
   timezone: string;
-  arrivalMinutes: number;
-  days: WeekdayChecklist;
-  latitude: string;
-  longitude: string;
-  radiusMeters: number;
+  exempt: boolean;
+  arrivalMinutes: number | null;
+  days: WeekdayChecklist | null;
+  latitude: string | null;
+  longitude: string | null;
+  radiusMeters: number | null;
 };
 
 export type WorkArrivalOverrideView = {
@@ -154,22 +155,28 @@ function TargetForm({
   groupId,
   groupMemberId,
   target,
+  defaults,
   timeZones,
   defaultDate,
 }: {
   groupId: string;
   groupMemberId: string;
   target?: WorkArrivalTargetView;
+  /** Place and clock to copy into a new target, such as the rule before an exemption. */
+  defaults?: WorkArrivalTargetView;
   timeZones: string[];
   defaultDate: string;
 }) {
   const [state, action, pending] = useActionState(saveWorkArrivalTarget, {});
-  const [latitude, setLatitude] = useState(target?.latitude ?? "");
-  const [longitude, setLongitude] = useState(target?.longitude ?? "");
+  const [exempt, setExempt] = useState(target?.exempt ?? false);
+  const seed = target ?? defaults;
+  const seededActive = seed && !seed.exempt ? seed : null;
+  const [latitude, setLatitude] = useState(seededActive?.latitude ?? "");
+  const [longitude, setLongitude] = useState(seededActive?.longitude ?? "");
   const [radiusMeters, setRadiusMeters] = useState(
-    String(target?.radiusMeters ?? DEFAULT_RADIUS_METERS),
+    String(seededActive?.radiusMeters ?? DEFAULT_RADIUS_METERS),
   );
-  const days = target?.days ?? defaultWorkdays();
+  const days = seededActive?.days ?? defaultWorkdays();
   const radiusValue = Number(radiusMeters);
   const radiusForMap =
     Number.isInteger(radiusValue) &&
@@ -185,8 +192,39 @@ function TargetForm({
         <input type="hidden" name="groupMemberId" value={groupMemberId} />
         {target ? <input type="hidden" name="targetId" value={target.id} /> : null}
         <p className="text-sm font-medium">
-          {target ? "Arrival target" : "Add an arrival target"}
+          {exempt
+            ? target
+              ? "No target"
+              : "Add a no-target period"
+            : target
+              ? "Arrival target"
+              : "Add an arrival target"}
         </p>
+        <fieldset className="text-sm">
+          <legend>From this date</legend>
+          <div className="mt-2 flex flex-wrap gap-3">
+            <label className="flex items-center gap-1.5">
+              <input
+                type="radio"
+                name="kind"
+                value="arrival"
+                checked={!exempt}
+                onChange={() => setExempt(false)}
+              />
+              Arrive by a time
+            </label>
+            <label className="flex items-center gap-1.5">
+              <input
+                type="radio"
+                name="kind"
+                value="none"
+                checked={exempt}
+                onChange={() => setExempt(true)}
+              />
+              No target
+            </label>
+          </div>
+        </fieldset>
         <label className="block text-sm">
           Effective starting date
           <input
@@ -201,54 +239,71 @@ function TargetForm({
           Timezone
           <TimeZoneSelect
             name="timezone"
-            defaultValue={target?.timezone ?? DEFAULT_TIMEZONE}
+            defaultValue={seed?.timezone ?? DEFAULT_TIMEZONE}
             timeZones={timeZones}
           />
         </label>
-        <label className="block text-sm">
-          Arrive by
-          <input
-            type="time"
-            name="arrivalTime"
-            required
-            defaultValue={formatArrivalInput(
-              target?.arrivalMinutes ?? DEFAULT_ARRIVAL_MINUTES,
-            )}
-            className={inputClass}
-          />
-        </label>
-        <WeekdayChecklistFields days={days} />
-        <div className="block text-sm">
-          Place
-          <div className="mt-1">
-            <PlacePickerMap
-              latitude={latitude}
-              longitude={longitude}
-              radiusMeters={radiusForMap}
-              onChange={(nextLatitude, nextLongitude) => {
-                setLatitude(nextLatitude);
-                setLongitude(nextLongitude);
-              }}
-            />
-          </div>
-        </div>
-        <label className="block text-sm">
-          Radius (meters)
-          <input
-            type="number"
-            name="radiusMeters"
-            required
-            min="1"
-            max={MAX_RADIUS_METERS}
-            step="1"
-            value={radiusMeters}
-            onChange={(event) => setRadiusMeters(event.target.value)}
-            className={inputClass}
-          />
-        </label>
+        {exempt ? (
+          <p className="text-xs text-neutral-500">
+            No arrival target from this date until the next one. Check-ins on
+            those days are not charged.
+          </p>
+        ) : (
+          <>
+            <label className="block text-sm">
+              Arrive by
+              <input
+                type="time"
+                name="arrivalTime"
+                required
+                defaultValue={formatArrivalInput(
+                  seededActive?.arrivalMinutes ?? DEFAULT_ARRIVAL_MINUTES,
+                )}
+                className={inputClass}
+              />
+            </label>
+            <WeekdayChecklistFields days={days} />
+            <div className="block text-sm">
+              Place
+              <div className="mt-1">
+                <PlacePickerMap
+                  latitude={latitude}
+                  longitude={longitude}
+                  radiusMeters={radiusForMap}
+                  onChange={(nextLatitude, nextLongitude) => {
+                    setLatitude(nextLatitude);
+                    setLongitude(nextLongitude);
+                  }}
+                />
+              </div>
+            </div>
+            <label className="block text-sm">
+              Radius (meters)
+              <input
+                type="number"
+                name="radiusMeters"
+                required
+                min="1"
+                max={MAX_RADIUS_METERS}
+                step="1"
+                value={radiusMeters}
+                onChange={(event) => setRadiusMeters(event.target.value)}
+                className={inputClass}
+              />
+            </label>
+          </>
+        )}
         <FieldMessage state={state} />
         <button type="submit" disabled={pending} className={`${primaryButtonClass} mt-auto`}>
-          {pending ? "Saving…" : target ? "Save target" : "Add target"}
+          {pending
+            ? "Saving…"
+            : exempt
+              ? target
+                ? "Save no target"
+                : "Add no target"
+              : target
+                ? "Save target"
+                : "Add target"}
         </button>
       </form>
       {target ? (
@@ -490,6 +545,7 @@ function PenaltyForm({
 
 function targetDetail(member: WorkArrivalMemberView, onDate: string): string | undefined {
   return datedDetail(member.targets, onDate, (entry) => {
+    if (entry.exempt || entry.arrivalMinutes === null || !entry.days) return "No target";
     return `${formatArrivalMinutes(entry.arrivalMinutes)} · ${countedDays(entry.days)}`;
   });
 }
@@ -553,6 +609,9 @@ function MemberArrivalCard({
               key={`new-target-${member.targets.map((entry) => entry.id).join(",")}`}
               groupId={groupId}
               groupMemberId={member.id}
+              defaults={[...member.targets]
+                .filter((entry) => !entry.exempt)
+                .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom))[0]}
               timeZones={timeZones}
               defaultDate={defaultDate}
             />

@@ -27,15 +27,38 @@ const TIME_OF_DAY = /^(\d{1,2}):(\d{2})$/;
 
 export type WeekdayChecklist = Record<Weekday, boolean>;
 
-export type WorkArrivalTargetForCharge = {
+export type ActiveWorkArrivalTarget = {
   effectiveFrom: string;
   timezone: string;
+  exempt: false;
   arrivalMinutes: number;
   days: WeekdayChecklist;
   latitude: number;
   longitude: number;
   radiusMeters: number;
 };
+
+/** No arrival target from effectiveFrom until the next target. */
+export type ExemptWorkArrivalTarget = {
+  effectiveFrom: string;
+  timezone: string;
+  exempt: true;
+};
+
+export type WorkArrivalTargetForCharge =
+  | ActiveWorkArrivalTarget
+  | ExemptWorkArrivalTarget;
+
+type ArrivalRule =
+  | { exempt: true }
+  | {
+      exempt: false;
+      arrivalMinutes: number;
+      days: WeekdayChecklist;
+      latitude: number;
+      longitude: number;
+      radiusMeters: number;
+    };
 
 export type WorkArrivalOverrideForCharge = {
   date: string;
@@ -148,9 +171,8 @@ function countedWeekdays(days: WeekdayChecklist): string {
 }
 
 /** Date-column note for the first arrival target, on the day it takes effect. */
-export function arrivalTargetStartNote(
-  target: Pick<WorkArrivalTargetForCharge, "arrivalMinutes" | "days" | "radiusMeters">,
-): string {
+export function arrivalTargetStartNote(target: ArrivalRule): string {
+  if (target.exempt) return "No target";
   return `Arrive by ${formatArrivalMinutes(target.arrivalMinutes)} · ${countedWeekdays(target.days)} · Place · ${target.radiusMeters.toLocaleString("en-US")} m`;
 }
 
@@ -160,15 +182,13 @@ export function arrivalTargetStartNote(
  * does. Timezone-only edits are omitted.
  */
 export function arrivalTargetChangeNote(
-  previous: Pick<
-    WorkArrivalTargetForCharge,
-    "arrivalMinutes" | "days" | "latitude" | "longitude" | "radiusMeters"
-  >,
-  next: Pick<
-    WorkArrivalTargetForCharge,
-    "arrivalMinutes" | "days" | "latitude" | "longitude" | "radiusMeters"
-  >,
+  previous: ArrivalRule,
+  next: ArrivalRule,
 ): string | null {
+  if (previous.exempt && next.exempt) return null;
+  if (next.exempt) return "No target";
+  if (previous.exempt) return arrivalTargetStartNote(next);
+
   const timeChanged = previous.arrivalMinutes !== next.arrivalMinutes;
   const daysChanged = !sameWeekdays(previous.days, next.days);
   const pinMoved =
@@ -250,6 +270,32 @@ export function workDayForArrival(
     workDay: calendarDateInTimeZone(instant, DEFAULT_TIMEZONE),
     timezone: DEFAULT_TIMEZONE,
   };
+}
+
+/**
+ * Timezone the dashboard uses for a work day's check-in clock: that day's
+ * override, otherwise the covering target, otherwise Asia/Singapore.
+ */
+export function arrivalTimeZoneForDate(
+  date: string,
+  targets: { effectiveFrom: string; timezone: string }[],
+  overrides: { date: string; timezone: string }[],
+): string {
+  const override = overrides.find((entry) => entry.date === date);
+  if (override && isValidTimeZone(override.timezone)) return override.timezone;
+  const target = coveringEntry(targets, date);
+  if (target && isValidTimeZone(target.timezone)) return target.timezone;
+  return DEFAULT_TIMEZONE;
+}
+
+/** True when `instant` falls on `workDay` in `timeZone`. */
+export function instantOnWorkDay(
+  instant: Date,
+  workDay: string,
+  timeZone: string,
+): boolean {
+  if (!isValidTimeZone(timeZone)) return false;
+  return calendarDateInTimeZone(instant, timeZone) === workDay;
 }
 
 function parseCoordinate(raw: unknown, min: number, max: number): number | null {
@@ -336,6 +382,13 @@ export function earlierCheckIn(
   return existing;
 }
 
+function activeTarget(
+  target: WorkArrivalTargetForCharge | undefined,
+): ActiveWorkArrivalTarget | undefined {
+  if (!target || target.exempt) return undefined;
+  return target;
+}
+
 function clockForDay(
   target: WorkArrivalTargetForCharge | undefined,
   override: WorkArrivalOverrideForCharge | undefined,
@@ -346,10 +399,11 @@ function clockForDay(
       arrivalMinutes: override.arrivalMinutes,
     };
   }
-  if (!target) return null;
+  const active = activeTarget(target);
+  if (!active) return null;
   return {
-    timezone: target.timezone,
-    arrivalMinutes: target.arrivalMinutes,
+    timezone: active.timezone,
+    arrivalMinutes: active.arrivalMinutes,
   };
 }
 
@@ -360,8 +414,9 @@ function dayCounts(
 ): boolean {
   if (override?.exempt) return false;
   if (override) return true;
-  if (!target) return false;
-  return target.days[weekdayOfDate(date)];
+  const active = activeTarget(target);
+  if (!active) return false;
+  return active.days[weekdayOfDate(date)];
 }
 
 function latenessBlocks(lateMs: number, blockMinutes: number): number {
@@ -406,10 +461,11 @@ export function chargeWorkArrivalDay(input: {
 
   const penalty = coveringPenalty(input.penalties, input.date);
   const capCents = penalty ? penaltyAmountToCents(penalty.cap) : 0;
+  const place = activeTarget(target);
   const inside =
     input.checkIn !== null &&
-    target !== undefined &&
-    isInsideRadius(input.checkIn, target);
+    place !== undefined &&
+    isInsideRadius(input.checkIn, place);
 
   if (!inside) {
     const upcoming = input.today !== undefined && input.date > input.today && input.checkIn === null;
@@ -516,6 +572,46 @@ export function chargeWorkArrivalMonth(input: {
       latestPenalty?.unit,
       latestPenalty?.unitLabel,
     ),
+  };
+}
+
+/** Drop a stored target row that cannot be charged. Exempt rows stay, with no place. */
+export function workArrivalTargetForCharge(row: {
+  effectiveFrom: string;
+  timezone: string;
+  exempt: boolean;
+  arrivalMinutes: number | null;
+  days: unknown;
+  latitude: number | null;
+  longitude: number | null;
+  radiusMeters: number | null;
+}): WorkArrivalTargetForCharge | null {
+  if (row.exempt) {
+    return {
+      effectiveFrom: row.effectiveFrom,
+      timezone: row.timezone,
+      exempt: true,
+    };
+  }
+  const days = parseWeekdayChecklist(row.days);
+  if (
+    days === null ||
+    row.arrivalMinutes === null ||
+    row.latitude === null ||
+    row.longitude === null ||
+    row.radiusMeters === null
+  ) {
+    return null;
+  }
+  return {
+    effectiveFrom: row.effectiveFrom,
+    timezone: row.timezone,
+    exempt: false,
+    arrivalMinutes: row.arrivalMinutes,
+    days,
+    latitude: row.latitude,
+    longitude: row.longitude,
+    radiusMeters: row.radiusMeters,
   };
 }
 

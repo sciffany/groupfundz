@@ -19,12 +19,15 @@ import {
   decidingEvent,
   decidingEventNote,
   formatDateOnly,
+  formatDateTimeLocal,
   formatTimeInZone,
   isNightRefreshable,
   isValidTimeZone,
   lastActivityInWindow,
   nightActivityWindow,
   parseDateOnly,
+  parseZonedDateTime,
+  type LastActivityEventType,
   parseHalfHoursPast8pm,
   parseSleepTimes,
   sleepTimesToJson,
@@ -571,8 +574,11 @@ async function activityWindowForMember(
 
 export type SleepNightEventView = {
   id: string;
+  eventType: string;
   label: string;
   timeLabel: string;
+  /** `datetime-local` value in the night's timezone. */
+  timeValue: string;
   decides: boolean;
   note: string | null;
 };
@@ -580,8 +586,11 @@ export type SleepNightEventView = {
 export type SleepNightEventsResult =
   | {
       ok: true;
-      canDelete: boolean;
+      canEdit: boolean;
       countedAtLabel: string | null;
+      timezone: string;
+      windowStart: string;
+      windowEnd: string;
       events: SleepNightEventView[];
     }
   | { ok: false; error: string };
@@ -629,14 +638,19 @@ export async function listSleepNightEvents(
 
   return {
     ok: true,
-    canDelete: viewer.group.ownerId === user.id,
+    canEdit: viewer.group.ownerId === user.id,
     countedAtLabel: decision
       ? formatTimeInZone(decision.at, window.timezone)
       : null,
+    timezone: window.timezone,
+    windowStart: formatDateTimeLocal(window.start, window.timezone),
+    windowEnd: formatDateTimeLocal(window.end, window.timezone),
     events: events.map((event) => ({
       id: event.id,
+      eventType: event.eventType,
       label: SLEEP_EVENT_LABELS[event.eventType] ?? event.eventType,
       timeLabel: formatEventStamp(event.eventTime, window.timezone),
+      timeValue: formatDateTimeLocal(event.eventTime, window.timezone),
       decides: decision?.event.id === event.id,
       note: decision?.event.id === event.id ? note : null,
     })),
@@ -740,4 +754,107 @@ export async function deleteSleepEvents(
   }
   revalidateGroup(groupId);
   return { ok: true, deleted: result.count };
+}
+
+const WINDOW_ERROR = "Enter a time in this night’s window, from 8:00 PM to 6:00 AM.";
+
+function parseEditableEventType(raw: string): LastActivityEventType | null {
+  return (LAST_ACTIVITY_EVENT_TYPES as readonly string[]).includes(raw)
+    ? (raw as LastActivityEventType)
+    : null;
+}
+
+function timeInWindow(instant: Date, start: Date, end: Date): boolean {
+  const time = instant.getTime();
+  return time >= start.getTime() && time <= end.getTime();
+}
+
+export async function updateSleepEventTime(
+  groupId: string,
+  eventId: string,
+  nightRaw: string,
+  eventTimeRaw: string,
+): Promise<DeleteSleepEventResult> {
+  const user = await requireOnboardedUser();
+  const group = await requireOwnedGroup(user.id, groupId);
+  if (!group) return { ok: false, error: "You can’t edit this group." };
+
+  const night = parseDateOnly(nightRaw);
+  if (!eventId || !night) return { ok: false, error: "That event wasn’t found." };
+
+  const event = await prisma.sleepEvent.findUnique({ where: { id: eventId } });
+  if (!event) return { ok: false, error: "That event wasn’t found." };
+
+  const member = await prisma.groupMember.findUnique({
+    where: { groupId_userId: { groupId, userId: event.userId } },
+  });
+  if (!member) return { ok: false, error: "That event isn’t in this group." };
+  if (await hasPendingInvite(groupId, event.userId)) {
+    return { ok: false, error: "They haven’t joined this group yet." };
+  }
+
+  const nightKey = formatDateOnly(night);
+  const window = await activityWindowForMember(member.id, night, nightKey);
+  if (!window || window.groupId !== groupId || window.userId !== event.userId) {
+    return { ok: false, error: "That event isn’t in this night." };
+  }
+  if (!timeInWindow(event.eventTime, window.start, window.end)) {
+    return { ok: false, error: "That event isn’t in this night." };
+  }
+
+  const eventTime = parseZonedDateTime(eventTimeRaw, window.timezone);
+  if (!eventTime || !timeInWindow(eventTime, window.start, window.end)) {
+    return { ok: false, error: WINDOW_ERROR };
+  }
+
+  await prisma.sleepEvent.update({
+    where: { id: eventId },
+    data: { eventTime },
+  });
+  await recomputeGroupSleepNight(groupId, night, nightKey, event.userId);
+  revalidateGroup(groupId);
+  return { ok: true };
+}
+
+export async function addSleepEvent(
+  groupId: string,
+  groupMemberId: string,
+  nightRaw: string,
+  eventTypeRaw: string,
+  eventTimeRaw: string,
+): Promise<DeleteSleepEventResult> {
+  const user = await requireOnboardedUser();
+  const group = await requireOwnedGroup(user.id, groupId);
+  if (!group) return { ok: false, error: "You can’t edit this group." };
+
+  const night = parseDateOnly(nightRaw);
+  if (!groupMemberId || !night) return { ok: false, error: "Pick a valid night." };
+
+  const eventType = parseEditableEventType(eventTypeRaw);
+  if (!eventType) return { ok: false, error: "Choose an event type." };
+
+  const nightKey = formatDateOnly(night);
+  const window = await activityWindowForMember(groupMemberId, night, nightKey);
+  if (!window || window.groupId !== groupId) {
+    return { ok: false, error: "That member isn’t in this group." };
+  }
+  if (await hasPendingInvite(groupId, window.userId)) {
+    return { ok: false, error: "They haven’t joined this group yet." };
+  }
+
+  const eventTime = parseZonedDateTime(eventTimeRaw, window.timezone);
+  if (!eventTime || !timeInWindow(eventTime, window.start, window.end)) {
+    return { ok: false, error: WINDOW_ERROR };
+  }
+
+  await prisma.sleepEvent.create({
+    data: {
+      userId: window.userId,
+      eventType,
+      eventTime,
+    },
+  });
+  await recomputeGroupSleepNight(groupId, night, nightKey, window.userId);
+  revalidateGroup(groupId);
+  return { ok: true };
 }

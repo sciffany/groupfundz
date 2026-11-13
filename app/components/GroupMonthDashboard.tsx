@@ -33,12 +33,14 @@ export function GroupMonthDashboard({
   members,
   today,
   dateNotes,
+  canEdit = false,
 }: {
   groupId: string;
   month: YearMonth;
   members: DashboardMember[];
   today: string;
   dateNotes?: Record<string, string[]>;
+  canEdit?: boolean;
 }) {
   const memberById = new Map(members.map((member) => [member.id, member]));
   const [selection, setSelection] = useState<{
@@ -55,7 +57,11 @@ export function GroupMonthDashboard({
   return (
     <DashboardSection
       title="Latest sleep time"
-      description="Last phone activity after 8:00 PM. Highlighted cells missed bedtime. Click a cell to see the events behind it."
+      description={
+        canEdit
+          ? "Last phone activity after 8:00 PM. Highlighted cells missed bedtime. Click a cell to view or edit that night’s events."
+          : "Last phone activity after 8:00 PM. Highlighted cells missed bedtime. Click a cell to see the events behind it."
+      }
       actions={<PruneSleepEventsButton groupId={groupId} />}
     >
       <DashboardMonthTable

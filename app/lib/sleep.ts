@@ -363,6 +363,30 @@ export function localDateTime(
   );
 }
 
+const ZONED_DATE_TIME = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
+
+/** `datetime-local` value for an instant in an IANA timezone, including seconds. */
+export function formatDateTimeLocal(date: Date, timeZone: string): string {
+  const parts = zoneWallParts(date, timeZone);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
+}
+
+/** Parse a `datetime-local` value as wall time in an IANA timezone. */
+export function parseZonedDateTime(value: string, timeZone: string): Date | null {
+  const match = ZONED_DATE_TIME.exec(value.trim());
+  if (!match || !isValidTimeZone(timeZone)) return null;
+  if (!parseDateOnly(match[1])) return null;
+  const hour = Number(match[2]);
+  const minute = Number(match[3]);
+  const second = Number(match[4] ?? 0);
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  const [year, month, day] = match[1].split("-").map(Number);
+  const instant = zonedWallTimeToUtc(year, month, day, hour, minute, timeZone);
+  if (second === 0) return instant;
+  return new Date(instant.getTime() + second * 1000);
+}
+
 export function bedtimeInstant(
   nightDate: string,
   halfHoursPast8pm: number,
