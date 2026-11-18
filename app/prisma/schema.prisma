@@ -131,6 +131,7 @@ model GroupMember {
   sleepOverrides       SleepOverride[]
   sleepPenalties       SleepPenalty[]
   stepTargets          StepTarget[]
+  stepExemptions       StepExemption[]
   stepPenalties        StepPenalty[]
   workArrivalTargets   WorkArrivalTarget[]
   workArrivalOverrides WorkArrivalOverride[]
@@ -239,6 +240,20 @@ model StepTarget {
   updatedAt     DateTime    @updatedAt
 
   @@unique([groupMemberId, effectiveFrom])
+}
+
+/// One step day with no target and no charge. Other days keep the standing target.
+model StepExemption {
+  id            String      @id @default(cuid())
+  groupMemberId String
+  groupMember   GroupMember @relation(fields: [groupMemberId], references: [id], onDelete: Cascade)
+  /// Calendar date this exemption applies to.
+  date          DateTime    @db.Date
+  note          String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@unique([groupMemberId, date])
 }
 
 model StepPenalty {

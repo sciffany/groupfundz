@@ -27,9 +27,8 @@ import {
   coveringPenalty,
   formatPenaltyAmount,
   formatPenaltyCharge,
-  stepPenaltyCents,
 } from "@/lib/penalty";
-import { stepShortfallUnits } from "@/lib/steps";
+import { assessStepDay, stepExemptionNote } from "@/lib/steps";
 import { prisma } from "@/lib/prisma";
 import { displayNameOf, requireOnboardedUser } from "@/lib/session";
 import { chargeSleepMonth } from "@/lib/sleep-month-charge";
@@ -162,11 +161,17 @@ function stepTargetDateNotes(
   members: {
     user: Parameters<typeof displayNameOf>[0] & { id: string };
     stepTargets: { effectiveFrom: Date; targetSteps: number }[];
+    stepExemptions: { date: Date; note: string | null }[];
   }[],
   dates: string[],
 ): Record<string, string[]> {
   const visible = new Set(dates);
   const byDate = new Map<string, { name: string; text: string }[]>();
+  const push = (date: string, name: string, text: string) => {
+    const list = byDate.get(date) ?? [];
+    list.push({ name, text });
+    byDate.set(date, list);
+  };
   for (const member of members) {
     const name = noteName(member.user, pendingRecipientIds);
     const targets = [...member.stepTargets].sort((a, b) =>
@@ -178,12 +183,14 @@ function stepTargetDateNotes(
       const changed =
         previousSteps !== null && target.targetSteps !== previousSteps;
       if (changed && visible.has(date)) {
-        const text = `Target ${target.targetSteps.toLocaleString("en-US")}`;
-        const list = byDate.get(date) ?? [];
-        list.push({ name, text });
-        byDate.set(date, list);
+        push(date, name, `Target ${target.targetSteps.toLocaleString("en-US")}`);
       }
       previousSteps = target.targetSteps;
+    }
+    for (const exemption of member.stepExemptions) {
+      const date = formatDateOnly(exemption.date);
+      if (!visible.has(date)) continue;
+      push(date, name, stepExemptionNote(exemption.note));
     }
   }
   return sharedDateNotes(byDate, members.length);
@@ -348,6 +355,9 @@ export default async function GroupPage({
           stepTargets: {
             select: { effectiveFrom: true, targetSteps: true },
             orderBy: { effectiveFrom: "asc" },
+          },
+          stepExemptions: {
+            select: { date: true, note: true },
           },
           stepPenalties: {
             select: {
@@ -538,13 +548,24 @@ export default async function GroupPage({
           members={group.members.map((member) => {
             const displayName = noteName(member.user, pendingRecipientIds);
             const editable = isOwner && !pendingRecipientIds.has(member.user.id);
+            const exemptionDates = new Set(
+              member.stepExemptions.map((exemption) => formatDateOnly(exemption.date)),
+            );
             if (pendingRecipientIds.has(member.user.id)) {
               return {
                 id: member.id,
                 displayName,
                 editable: false,
                 cells: Object.fromEntries(
-                  dates.map((date) => [date, { steps: null, below: false, penaltyLabel: null }]),
+                  dates.map((date) => [
+                    date,
+                    {
+                      steps: null,
+                      below: false,
+                      penaltyLabel: null,
+                      exempt: exemptionDates.has(date),
+                    },
+                  ]),
                 ),
                 totalPenalty: "—",
               };
@@ -569,31 +590,27 @@ export default async function GroupPage({
             let totalCents = 0;
             for (const date of dates) {
               const record = nights.get(date);
-              const steps = record?.steps;
-              const edited = record?.manual ?? false;
               const target = coveringPenalty(targets, date);
               const penalty = coveringPenalty(penalties, date);
-              if (steps === undefined || !target) {
-                cells[date] = {
-                  steps: steps ?? null,
-                  below: false,
-                  penaltyLabel: null,
-                  edited,
-                };
-                continue;
-              }
-
-              const units = stepShortfallUnits(steps, target.targetSteps);
-              const below = units > 0;
-              const cents = penalty ? stepPenaltyCents(units, penalty.amount) : 0;
-              totalCents += cents;
+              const assessed = assessStepDay({
+                steps: record?.steps,
+                targetSteps: target?.targetSteps,
+                penaltyAmount: penalty?.amount,
+                exempt: exemptionDates.has(date),
+              });
+              totalCents += assessed.cents;
               cells[date] = {
-                steps,
-                below,
-                penaltyLabel: below
-                  ? formatPenaltyCharge(cents, penalty?.unit, penalty?.unitLabel)
+                steps: assessed.steps,
+                below: assessed.below,
+                penaltyLabel: assessed.below
+                  ? formatPenaltyCharge(
+                      assessed.cents,
+                      penalty?.unit,
+                      penalty?.unitLabel,
+                    )
                   : null,
-                edited,
+                edited: record?.manual ?? false,
+                exempt: assessed.exempt,
               };
             }
 

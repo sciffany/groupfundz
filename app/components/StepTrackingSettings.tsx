@@ -11,8 +11,10 @@ import {
 } from "@/components/SettingsDisclosure";
 import type { ActionState } from "@/lib/actions/profile";
 import {
+  deleteStepExemption,
   deleteStepPenalty,
   deleteStepTarget,
+  saveStepExemption,
   saveStepPenalty,
   saveStepTarget,
 } from "@/lib/actions/steps";
@@ -24,7 +26,7 @@ import {
   PENALTY_UNIT_LABELS,
   type PenaltyUnit,
 } from "@/lib/penalty";
-import { DEFAULT_TARGET_STEPS } from "@/lib/steps";
+import { DEFAULT_TARGET_STEPS, MAX_STEP_EXEMPTION_NOTE_LENGTH } from "@/lib/steps";
 
 const inputClass =
   "mt-1 w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-neutral-500";
@@ -39,6 +41,12 @@ export type StepTargetView = {
   id: string;
   effectiveFrom: string;
   targetSteps: number;
+};
+
+export type StepExemptionView = {
+  id: string;
+  date: string;
+  note: string | null;
 };
 
 export type StepPenaltyView = {
@@ -56,6 +64,7 @@ export type StepMemberView = {
   role: "OWNER" | "MEMBER";
   pending?: boolean;
   targets: StepTargetView[];
+  exemptions: StepExemptionView[];
   penalties: StepPenaltyView[];
 };
 
@@ -131,6 +140,77 @@ function TargetForm({
           action={deleteStepTarget}
           hidden={{ groupId, targetId: target.id }}
           confirmMessage="Delete this step target?"
+          className={deleteButtonClass}
+        >
+          Delete
+        </ConfirmForm>
+      ) : null}
+    </div>
+  );
+}
+
+function ExemptionForm({
+  groupId,
+  groupMemberId,
+  exemption,
+  defaultDate,
+}: {
+  groupId: string;
+  groupMemberId: string;
+  exemption?: StepExemptionView;
+  defaultDate: string;
+}) {
+  const [state, action, pending] = useActionState(saveStepExemption, {});
+
+  return (
+    <div className="flex min-w-0 flex-col space-y-3 rounded-md border border-neutral-200 bg-neutral-50 p-3">
+      <form action={action} className="flex min-w-0 flex-1 flex-col space-y-3">
+        <input type="hidden" name="groupId" value={groupId} />
+        <input type="hidden" name="groupMemberId" value={groupMemberId} />
+        {exemption ? (
+          <input type="hidden" name="exemptionId" value={exemption.id} />
+        ) : null}
+
+        <p className="text-sm font-medium">
+          {exemption ? "One-day exemption" : "Add a one-day exemption"}
+        </p>
+
+        <label className="block text-sm">
+          Step day
+          <input
+            type="date"
+            name="date"
+            required
+            defaultValue={exemption?.date ?? defaultDate}
+            className={inputClass}
+          />
+          <span className="mt-1 block text-xs text-neutral-500">
+            This day has no step target and owes nothing. The daily target
+            applies again the next day.
+          </span>
+        </label>
+
+        <label className="block text-sm">
+          Note <span className="text-neutral-500">(optional)</span>
+          <input
+            name="note"
+            maxLength={MAX_STEP_EXEMPTION_NOTE_LENGTH}
+            defaultValue={exemption?.note ?? ""}
+            placeholder="e.g. Sick day"
+            className={inputClass}
+          />
+        </label>
+
+        <FieldMessage state={state} />
+        <button type="submit" disabled={pending} className={`${primaryButtonClass} mt-auto`}>
+          {pending ? "Saving…" : exemption ? "Save exemption" : "Add exemption"}
+        </button>
+      </form>
+      {exemption ? (
+        <ConfirmForm
+          action={deleteStepExemption}
+          hidden={{ groupId, exemptionId: exemption.id }}
+          confirmMessage="Delete this one-day exemption?"
           className={deleteButtonClass}
         >
           Delete
@@ -259,9 +339,10 @@ function stepPenaltyDetail(member: StepMemberView, onDate: string): string | und
 }
 
 function stepMemberMeta(member: StepMemberView, onDate: string): string {
+  const exempt = member.exemptions.some((exemption) => exemption.date === onDate);
   return [
     memberIdentity(member),
-    stepTargetDetail(member, onDate) ?? "No target",
+    exempt ? "Exempt" : (stepTargetDetail(member, onDate) ?? "No target"),
     stepPenaltyDetail(member, onDate) ?? "No penalty",
   ].join(" · ");
 }
@@ -305,6 +386,37 @@ function MemberStepCard({
               ))}
               <TargetForm
                 key={`new-target-${member.targets.map((t) => t.id).join(",")}`}
+                groupId={groupId}
+                groupMemberId={member.id}
+                defaultDate={defaultDate}
+              />
+            </div>
+          </div>
+        </SettingsDisclosure>
+
+        <SettingsDisclosure
+          title="One-day exemptions"
+          meta={sectionMeta(member.exemptions.length, "exemption")}
+          heading="h4"
+          tone="section"
+        >
+          <div className="space-y-3">
+            <p className="text-xs text-neutral-500">
+              Exempt a single step day. The standing target stays in place for
+              every other day.
+            </p>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+              {member.exemptions.map((exemption) => (
+                <ExemptionForm
+                  key={exemption.id}
+                  groupId={groupId}
+                  groupMemberId={member.id}
+                  exemption={exemption}
+                  defaultDate={defaultDate}
+                />
+              ))}
+              <ExemptionForm
+                key={`new-exemption-${member.exemptions.map((exemption) => exemption.id).join(",")}`}
                 groupId={groupId}
                 groupMemberId={member.id}
                 defaultDate={defaultDate}

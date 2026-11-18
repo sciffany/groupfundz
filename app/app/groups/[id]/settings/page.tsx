@@ -60,6 +60,7 @@ export default async function GroupSettingsPage({
           sleepOverrides: { orderBy: { date: "asc" } },
           sleepPenalties: { orderBy: { effectiveFrom: "asc" } },
           stepTargets: { orderBy: { effectiveFrom: "asc" } },
+          stepExemptions: { orderBy: { date: "asc" } },
           stepPenalties: { orderBy: { effectiveFrom: "asc" } },
           workArrivalTargets: { orderBy: { effectiveFrom: "asc" } },
           workArrivalOverrides: { orderBy: { date: "asc" } },
@@ -208,6 +209,11 @@ export default async function GroupSettingsPage({
             id: target.id,
             effectiveFrom: formatDateOnly(target.effectiveFrom),
             targetSteps: target.targetSteps,
+          })),
+          exemptions: member.stepExemptions.map((exemption) => ({
+            id: exemption.id,
+            date: formatDateOnly(exemption.date),
+            note: exemption.note,
           })),
           penalties: member.stepPenalties.map((penalty) => ({
             id: penalty.id,

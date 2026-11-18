@@ -8,7 +8,7 @@ import {
   DashboardSection,
 } from "@/components/dashboard";
 import { RefreshStepsButton } from "@/components/RefreshStepsButton";
-import { setMemberDaySteps } from "@/lib/actions/steps";
+import { setMemberDaySteps, setStepDayExemption } from "@/lib/actions/steps";
 import { weekdayShort, type YearMonth } from "@/lib/month";
 import { MAX_TARGET_STEPS } from "@/lib/steps";
 
@@ -17,6 +17,7 @@ export type StepsDashboardCell = {
   below: boolean;
   penaltyLabel: string | null;
   edited?: boolean;
+  exempt?: boolean;
 };
 
 export type StepsDashboardMember = {
@@ -37,6 +38,7 @@ function StepDayDialog({
   memberName,
   date,
   steps,
+  exempt: initialExempt,
   onClose,
 }: {
   groupId: string;
@@ -44,12 +46,14 @@ function StepDayDialog({
   memberName: string;
   date: string;
   steps: number | null;
+  exempt: boolean;
   onClose: () => void;
 }) {
   const router = useRouter();
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const [value, setValue] = useState(steps === null ? "" : String(steps));
+  const [exempt, setExempt] = useState(initialExempt);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
@@ -70,9 +74,29 @@ function StepDayDialog({
   const save = () => {
     setError(null);
     startTransition(async () => {
-      const result = await setMemberDaySteps(groupId, memberId, date, value);
-      if (!result.ok) {
-        setError(result.error);
+      const trimmed = value.trim();
+      const stepsText = steps === null ? "" : String(steps);
+      const stepsChanged = trimmed !== stepsText;
+      if (stepsChanged) {
+        if (trimmed === "") {
+          setError(
+            `Enter a whole number of steps from 0 to ${MAX_TARGET_STEPS.toLocaleString("en-US")}.`,
+          );
+          return;
+        }
+        const result = await setMemberDaySteps(groupId, memberId, date, trimmed);
+        if (!result.ok) {
+          setError(result.error);
+          return;
+        }
+      }
+      if (!stepsChanged && exempt === initialExempt) {
+        onClose();
+        return;
+      }
+      const exemption = await setStepDayExemption(groupId, memberId, date, exempt);
+      if (!exemption.ok) {
+        setError(exemption.error);
         return;
       }
       router.refresh();
@@ -123,7 +147,6 @@ function StepDayDialog({
             Steps
             <input
               type="number"
-              required
               min={0}
               max={MAX_TARGET_STEPS}
               step={1}
@@ -132,6 +155,20 @@ function StepDayDialog({
               onChange={(event) => setValue(event.target.value)}
               className="mt-1 w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-neutral-500"
             />
+          </label>
+          <label className="flex items-start gap-2 text-sm text-neutral-700">
+            <input
+              type="checkbox"
+              checked={exempt}
+              onChange={(event) => setExempt(event.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              No step target this day
+              <span className="mt-1 block text-xs text-neutral-500">
+                Only this day. The daily target applies again the next day.
+              </span>
+            </span>
           </label>
           <p className="text-xs text-neutral-500">
             This total stays until you change it again. Phone and sheet
@@ -143,7 +180,7 @@ function StepDayDialog({
             disabled={isPending}
             className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white hover:bg-neutral-800 disabled:opacity-60"
           >
-            {isPending ? "Saving…" : "Save steps"}
+            {isPending ? "Saving…" : "Save"}
           </button>
         </form>
       </div>
@@ -179,8 +216,8 @@ export function GroupMonthStepsDashboard({
       title="Daily steps"
       description={
         canEdit
-          ? "Total steps for each day. Highlighted cells missed the target. Click a cell to set that day’s steps."
-          : "Total steps for each day. Highlighted cells missed the target."
+          ? "Total steps for each day. Highlighted cells missed the target. An exempt day has no target. Click a cell to set that day’s steps."
+          : "Total steps for each day. Highlighted cells missed the target. An exempt day has no target."
       }
       actions={<RefreshStepsButton groupId={groupId} />}
     >
@@ -194,14 +231,30 @@ export function GroupMonthStepsDashboard({
           const member = memberById.get(memberId);
           const cell = member?.cells[date];
           const steps = cell?.steps;
-          const value =
-            steps === null || steps === undefined ? null : formatSteps(steps);
+          const exempt = Boolean(cell?.exempt);
+          const hasSteps = steps !== null && steps !== undefined;
+          const value = hasSteps ? formatSteps(steps) : exempt ? "Exempt" : null;
+          const caption = [
+            exempt && hasSteps ? "exempt" : null,
+            cell?.edited ? "edited" : null,
+          ]
+            .filter((part) => part !== null)
+            .join(" · ");
           const cellView = (
             <DashboardMetricCell
               value={value}
               flagged={cell?.below ?? false}
               penaltyLabel={cell?.penaltyLabel ?? null}
-              caption={cell?.edited ? "edited" : null}
+              caption={caption || null}
+              className={
+                exempt && !cell?.below
+                  ? "bg-neutral-100"
+                  : cell?.below
+                    ? "group-hover:bg-rose-100"
+                    : member?.editable
+                      ? "group-hover:bg-neutral-100"
+                      : ""
+              }
             />
           );
           if (!member?.editable) return cellView;
@@ -226,6 +279,7 @@ export function GroupMonthStepsDashboard({
           memberName={selectedMember.displayName}
           date={selection.date}
           steps={selectedMember.cells[selection.date]?.steps ?? null}
+          exempt={selectedMember.cells[selection.date]?.exempt ?? false}
           onClose={() => setSelection(null)}
         />
       ) : null}

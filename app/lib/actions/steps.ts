@@ -11,7 +11,12 @@ import {
 } from "@/lib/penalty";
 import { hasPendingInvite } from "@/lib/pending-members";
 import { parseDateOnly } from "@/lib/sleep";
-import { MAX_TARGET_STEPS, parseRecordedSteps, parseTargetSteps } from "@/lib/steps";
+import {
+  MAX_STEP_EXEMPTION_NOTE_LENGTH,
+  MAX_TARGET_STEPS,
+  parseRecordedSteps,
+  parseTargetSteps,
+} from "@/lib/steps";
 import { requireOnboardedUser } from "@/lib/session";
 
 async function requireOwnedGroup(userId: string, groupId: string) {
@@ -72,6 +77,121 @@ export async function setMemberDaySteps(
   });
   revalidateGroup(groupId);
   return { ok: true };
+}
+
+export async function setStepDayExemption(
+  groupId: string,
+  groupMemberId: string,
+  dayRaw: string,
+  exempt: boolean,
+): Promise<SetMemberDayStepsResult> {
+  const user = await requireOnboardedUser();
+  const group = await requireOwnedGroup(user.id, groupId);
+  if (!group) return { ok: false, error: "You can’t edit this group." };
+
+  const day = parseDateOnly(dayRaw);
+  if (!day) return { ok: false, error: "Enter a valid step day." };
+
+  const member = await prisma.groupMember.findUnique({
+    where: { id: groupMemberId },
+  });
+  if (!member || member.groupId !== groupId) {
+    return { ok: false, error: "That member isn’t in this group." };
+  }
+  if (await hasPendingInvite(groupId, member.userId)) {
+    return { ok: false, error: "They haven’t joined this group yet." };
+  }
+
+  if (exempt) {
+    await prisma.stepExemption.upsert({
+      where: { groupMemberId_date: { groupMemberId, date: day } },
+      create: { groupMemberId, date: day },
+      update: {},
+    });
+  } else {
+    await prisma.stepExemption.deleteMany({
+      where: { groupMemberId, date: day },
+    });
+  }
+  revalidateGroup(groupId);
+  return { ok: true };
+}
+
+export async function saveStepExemption(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await requireOnboardedUser();
+  const groupId = String(formData.get("groupId") ?? "");
+  const groupMemberId = String(formData.get("groupMemberId") ?? "");
+  const exemptionId = String(formData.get("exemptionId") ?? "").trim();
+  const dateRaw = String(formData.get("date") ?? "");
+  const noteRaw = String(formData.get("note") ?? "").trim();
+
+  const group = await requireOwnedGroup(user.id, groupId);
+  if (!group) return { error: "You can’t edit this group." };
+
+  const member = await prisma.groupMember.findUnique({
+    where: { id: groupMemberId },
+  });
+  if (!member || member.groupId !== groupId) {
+    return { error: "That member isn’t in this group." };
+  }
+
+  const date = parseDateOnly(dateRaw);
+  if (!date) return { error: "Enter a valid step day." };
+  if (noteRaw.length > MAX_STEP_EXEMPTION_NOTE_LENGTH) {
+    return {
+      error: `Keep the note to ${MAX_STEP_EXEMPTION_NOTE_LENGTH} characters or fewer.`,
+    };
+  }
+  const note = noteRaw || null;
+  const data = { date, note };
+
+  try {
+    if (exemptionId) {
+      const existing = await prisma.stepExemption.findUnique({
+        where: { id: exemptionId },
+      });
+      if (!existing || existing.groupMemberId !== groupMemberId) {
+        return { error: "That exemption wasn’t found." };
+      }
+      await prisma.stepExemption.update({
+        where: { id: exemptionId },
+        data,
+      });
+    } else {
+      await prisma.stepExemption.create({
+        data: { groupMemberId, ...data },
+      });
+    }
+  } catch (error) {
+    if (uniqueConstraintError(error)) {
+      return { error: "This member already has an exemption on that day." };
+    }
+    throw error;
+  }
+
+  revalidateGroup(groupId);
+  return { success: exemptionId ? "Exemption saved." : "Exemption added." };
+}
+
+export async function deleteStepExemption(formData: FormData) {
+  const user = await requireOnboardedUser();
+  const groupId = String(formData.get("groupId") ?? "");
+  const exemptionId = String(formData.get("exemptionId") ?? "");
+
+  const group = await requireOwnedGroup(user.id, groupId);
+  if (!group) return;
+
+  const existing = await prisma.stepExemption.findUnique({
+    where: { id: exemptionId },
+    include: { groupMember: { select: { groupId: true } } },
+  });
+  if (!existing || existing.groupMember.groupId !== groupId) return;
+
+  await prisma.stepExemption.delete({ where: { id: exemptionId } });
+  revalidateGroup(groupId);
 }
 
 export async function saveStepTarget(
